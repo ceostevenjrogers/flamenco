@@ -17,6 +17,9 @@ DEPSGRAPH_CLEAN_SLATE_TASK_STATUSES = ['queued', 'claimed-by-manager',
                                        'active', 'cancel-requested']
 DEPSGRAPH_MODIFIED_SINCE_TASK_STATUSES = ['queued', 'claimed-by-manager']
 
+# Number of lines of logging to keep on the task itself.
+LOG_TAIL_LINES = 10
+
 
 def manager_api_call(wrapped):
     """Decorator, performs some standard stuff for Manager API endpoints."""
@@ -44,26 +47,47 @@ def manager_api_call(wrapped):
 @api_blueprint.route('/<manager_id>/startup', methods=['POST'])
 @manager_api_call
 def startup(manager_id, notification):
+    log.info('Received startup notification from manager %s %s', manager_id, notification)
+    return handle_notification(manager_id, notification)
+
+
+@api_blueprint.route('/<manager_id>/update', methods=['POST'])
+@manager_api_call
+def update(manager_id, notification):
+    log.info('Received configuration update notification from manager %s %s',
+             manager_id, notification)
+    return handle_notification(manager_id, notification)
+
+
+def handle_notification(manager_id: str, notification: dict):
     from flamenco import current_flamenco
     import uuid
     import datetime
 
-    log.info('Received startup notification from manager %s %s', manager_id, notification)
-
     if not notification:
         raise wz_exceptions.BadRequest('no JSON payload received')
 
-    mngr_coll = current_flamenco.db('managers')
-    update_res = mngr_coll.update_one(
-        {'_id': manager_id},
-        {'$set': {
+    try:
+        updates = {
             '_updated': datetime.datetime.utcnow(),
             '_etag': uuid.uuid4().hex,
             'url': notification['manager_url'],
             'variables': notification['variables'],
             'path_replacement': notification['path_replacement'],
             'stats.nr_of_workers': notification['nr_of_workers'],
-        }}
+        }
+    except KeyError as ex:
+        raise wz_exceptions.BadRequest(f'Missing key {ex}')
+
+    try:
+        updates['worker_task_types'] = notification['worker_task_types']
+    except KeyError:
+        pass
+
+    mngr_coll = current_flamenco.db('managers')
+    update_res = mngr_coll.update_one(
+        {'_id': manager_id},
+        {'$set': updates}
     )
     if update_res.matched_count != 1:
         log.warning('Updating manager %s matched %i documents.',
@@ -147,6 +171,10 @@ def handle_task_update_batch(manager_id, task_updates):
             received_on_manager = utcnow()
 
         # Store the log for this task, allowing for duplicate log reports.
+        #
+        # NOTE: is deprecated and will be removed in a future version of Flamenco;
+        # only periodically send the last few lines of logging in 'log_tail' and
+        # store the entire log on the Manager itself.
         task_log = task_update.get('log')
         if task_log:
             log_doc = {
@@ -177,6 +205,13 @@ def handle_task_update_batch(manager_id, task_updates):
         worker = task_update.get('worker')
         if worker:
             updates['worker'] = worker
+
+        # Store the last lines of logging on the task itself.
+        task_log_tail: str = task_update.get('log_tail')
+        if not task_log_tail and task_log:
+            task_log_tail = '\n'.join(task_log.split('\n')[-LOG_TAIL_LINES:])
+        if task_log_tail:
+            updates['log'] = task_log_tail
 
         result = tasks_coll.update_one({'_id': task_id}, {'$set': updates})
         total_modif_count += result.modified_count
@@ -230,7 +265,7 @@ def tasks_cancel_requested(manager_id):
         task['_id']
         for task in tasks_coll.find({'manager': manager_id, 'status': 'cancel-requested'},
                                     projection={'_id': 1})
-        }
+    }
 
     log.debug('Returning %i tasks to be canceled by manager %s', len(task_ids), manager_id)
     return task_ids

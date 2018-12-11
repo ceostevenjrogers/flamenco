@@ -304,6 +304,58 @@ class TaskBatchUpdateTest(AbstractTaskBatchUpdateTest):
         self.do_batch_update(tasks, [0, 1, 2], 3 * ['completed'])
         self.assert_job_status('archived')
 
+    def test_job_status_queued_after_task_update(self):
+        """A job should go to queued when its tasks are going back to claimed-by-manager.
+        """
+
+        self.force_job_status('queued')
+        tasks = self.do_schedule_tasks()
+
+        # Mimick two tasks going active, and then one-by-one being re-queued.
+        self.do_batch_update(tasks, [0, 1], ['active', 'active'])
+        self.assert_job_status('active')
+        self.do_batch_update(tasks, [0], ['claimed-by-manager'])
+        self.assert_job_status('active')
+        self.do_batch_update(tasks, [1], ['claimed-by-manager'])
+        self.assert_job_status('queued')
+
+    def test_append_or_overwrite_log(self):
+        chunk = self.get('/api/flamenco/managers/%s/depsgraph' % self.mngr_id,
+                         auth_token=self.mngr_token).json['depsgraph']
+        task = chunk[0]
+
+        self.post('/api/flamenco/managers/%s/task-update-batch' % self.mngr_id,
+                  auth_token=self.mngr_token,
+                  json=[{
+                      '_id': '000000000000000000000001',
+                      'task_id': task['_id'],
+                      'task_status': 'active',
+                      'activity': 'testing stuff',
+                      'received_on_manager': '2018-03-04T3:27:47+02:00',
+                      'log': 'this is log line 1\nthis is log line 2\n',
+                      'log_tail': 'this is log-tail line 1\nthis is log-tail line 2\n',
+                  }])
+
+        db_task = self.assert_task_status(task['_id'], 'active')
+        self.assertEqual(db_task['activity'], 'testing stuff')
+        self.assertEqual(db_task['log'], 'this is log-tail line 1\nthis is log-tail line 2\n')
+
+        self.post('/api/flamenco/managers/%s/task-update-batch' % self.mngr_id,
+                  auth_token=self.mngr_token,
+                  json=[{
+                      '_id': '000000000000000000000002',
+                      'task_id': task['_id'],
+                      'task_status': 'active',
+                      'activity': 'testing more stuff',
+                      'received_on_manager': '2018-03-04T3:27:47+02:00',
+                      'log': 'this is log line 3\nthis is log line 4\n',
+                      'log_tail': 'this is log-tail line 3\nthis is log-tail line 4\n',
+                  }])
+
+        db_task = self.assert_task_status(task['_id'], 'active')
+        self.assertEqual(db_task['activity'], 'testing more stuff')
+        self.assertEqual(db_task['log'], 'this is log-tail line 3\nthis is log-tail line 4\n')
+
 
 class LargeTaskBatchUpdateTest(AbstractTaskBatchUpdateTest):
     """Similar tests to TaskBatchUpdateTest, but with a job consisting of many more tasks."""

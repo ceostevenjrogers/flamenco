@@ -12,6 +12,10 @@
 				.table-cell(class="status-{{ job.status }}")
 					| {{ job.status | undertitle }}
 			.table-row
+				.table-cell Created by
+				.table-cell
+					| {{ user_name }}
+			.table-row
 				.table-cell Last Update
 				.table-cell(title="{{ job._updated }}")
 					span(role='button',
@@ -30,6 +34,9 @@
 				.table-cell Priority
 				.table-cell(title="Higher number means higher priority")
 					| {{ job.priority }}
+					| {% if can_change_prio %}
+					a(href="javascript:changeJobPriority('{{ job._id }}')") (change)
+					| {% endif %}
 			| {% if manager %}
 			// manager can be None if the user doesn't have GET rights on it.
 			.table-row

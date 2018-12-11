@@ -1,6 +1,7 @@
 # -*- encoding: utf-8 -*-
 
 import collections
+import functools
 import logging
 
 import bson
@@ -11,6 +12,7 @@ import pillarsdk
 import pillar.flask_extra
 from pillar.web.system_util import pillar_api
 from pillar.auth import current_user
+from pillar import current_app
 
 from flamenco.routes import flamenco_project_view
 from flamenco import current_flamenco
@@ -36,6 +38,8 @@ ALLOWED_JOB_STATUSES_FROM_WEB = {'cancel-requested', 'queued', 'requeued'}
 @perproject_archive_blueprint.route('/', endpoint='index')
 @flamenco_project_view(extension_props=False, action=Actions.VIEW)
 def for_project(project, job_id=None, task_id=None):
+    api = pillar_api()
+
     is_archive = request.blueprint == perproject_archive_blueprint.name
     jobs = current_flamenco.job_manager.jobs_for_project(project['_id'],
                                                          archived=is_archive)
@@ -47,11 +51,27 @@ def for_project(project, job_id=None, task_id=None):
         new_url = url_for(f'{target_blueprint.name}.{target_endpoint}', **request.view_args)
         return redirect(new_url, code=307)
 
-    # Find the link URL for each job.
+    @functools.lru_cache()
+    def manager_name(manager_id: str) -> str:
+        from ..managers.sdk import Manager
+
+        try:
+            manager = Manager.find(manager_id, api=api)
+        except pillarsdk.ForbiddenAccess:
+            # It's possible that the user doesn't have access to this Manager.
+            return '-unknown-'
+        except pillarsdk.ResourceNotFound:
+            log.warning('Unable to find manager %r for job list of project %s',
+                        manager_id, project['_id'])
+            return '-unknown-'
+        return manager['name'] or '-unknown-'
+
+    # Find the link URL and Manager name for each job.
     for job in jobs['_items']:
         target_blueprint = blueprint_for_archived[job.status == 'archived']
         job.url = url_for(f'{target_blueprint.name}.view_job',
                           project_url=project.url, job_id=job._id)
+        job.manager_name = manager_name(job['manager'])
 
     return render_template('flamenco/jobs/list_for_project.html',
                            stats={'nr_of_jobs': '∞', 'nr_of_tasks': '∞'},
@@ -101,6 +121,13 @@ def view_job(project, flamenco_props, job_id):
         log.warning('Flamenco job %s has a non-existant manager %s', job_id, job.manager)
         manager = None
 
+    users_coll = current_app.db('users')
+    user = users_coll.find_one(bson.ObjectId(job.user), projection={'username': 1})
+    if user:
+        user_name = user.get('username') or '-unknown-'
+    else:
+        user_name = '-unknown-'
+
     from . import (CANCELABLE_JOB_STATES, REQUEABLE_JOB_STATES, RECREATABLE_JOB_STATES,
                    ARCHIVE_JOB_STATES, ARCHIVEABLE_JOB_STATES, FAILED_TASKS_REQUEABLE_JOB_STATES)
 
@@ -115,9 +142,12 @@ def view_job(project, flamenco_props, job_id):
     job_settings = collections.OrderedDict((key, job.settings[key])
                                            for key in sorted(job.settings.to_dict().keys()))
 
+    change_prio_states = RECREATABLE_JOB_STATES | REQUEABLE_JOB_STATES | CANCELABLE_JOB_STATES
+
     return render_template(
         'flamenco/jobs/view_job_embed.html',
         job=job,
+        user_name=user_name,
         manager=manager,
         project=project,
         flamenco_props=flamenco_props.to_dict(),
@@ -128,6 +158,7 @@ def view_job(project, flamenco_props, job_id):
         can_archive_job=write_access and status in ARCHIVEABLE_JOB_STATES,
         # TODO(Sybren): check that there are actually failed tasks before setting to True:
         can_requeue_failed_tasks=write_access and status in FAILED_TASKS_REQUEABLE_JOB_STATES,
+        can_change_prio=write_access and status in change_prio_states,
         is_archived=is_archived,
         write_access=write_access,
         archive_available=archive_available,

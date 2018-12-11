@@ -30,7 +30,22 @@ def archive_job(job_id: str):
     import tempfile
     import celery
 
-    job_oid = bson.ObjectId(job_id)
+    try:
+        job_oid = bson.ObjectId(job_id)
+    except bson.errors.InvalidId as ex:
+        log.error('%s', ex)
+        return
+
+    jobs_coll = current_flamenco.db('jobs')
+    job = jobs_coll.find_one({'_id': job_oid})
+    if job is None:
+        log.info('Job %s does not exist, not archiving', job_oid)
+        return
+
+    if job['status'] == 'archived':
+        log.info('Job %s already archived, not archiving again', job_oid)
+        return
+
     log.info('Archiving job %s', job_oid)
 
     # Create a temporary directory for the file operations.
@@ -41,9 +56,6 @@ def archive_job(job_id: str):
     # TODO: store the ZIP link in the job JSON in MongoDB.
 
     # Write the job to JSON.
-    jobs_coll = current_flamenco.db('jobs')
-    job = jobs_coll.find_one({'_id': job_oid})
-
     pre_archive_status = job.get('pre_archive_status')
     if pre_archive_status:
         job['status'] = pre_archive_status
@@ -65,9 +77,9 @@ def archive_job(job_id: str):
     # The chain of everything except downloading tasks & logs. Celery can't handle empty
     # groups, so we have to be careful in constructing the download_tasks group.
     chain = (
-        create_upload_zip.si(str(job['project']), storage_path, str(zip_path)) |
-        update_mongo.s(job_id) |
-        cleanup.si(storage_path)
+            create_upload_zip.si(str(job['project']), storage_path, str(zip_path)) |
+            update_mongo.s(job_id) |
+            cleanup.si(storage_path)
     )
 
     if tasks.count():
@@ -77,6 +89,7 @@ def archive_job(job_id: str):
         chain = download_tasks | chain
 
     chain()
+
 
 @current_app.celery.task(ignore_result=True)
 def resume_job_archiving():
@@ -114,9 +127,11 @@ def download_task_and_log(storage_path: str, task_id: str):
     logs_coll = current_flamenco.db('task_logs')
 
     task = tasks_coll.find_one({'_id': task_oid})
+
+    # Use the exact same sort as we've created an index for.
     logs = logs_coll.find({'task': task_oid}).sort([
+        ('task', pymongo.ASCENDING),
         ('received_on_manager', pymongo.ASCENDING),
-        ('_id', pymongo.ASCENDING),
     ])
 
     # Save the task as JSON

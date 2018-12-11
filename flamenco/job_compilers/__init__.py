@@ -17,15 +17,12 @@ def register_compiler(job_type):
 
 
 # Import subpackages to register the compilers
-from . import sleep, blender_render, blender_render_progressive, abstract_compiler
+from . import abstract_compiler, blender_render, blender_render_progressive, blender_video_chunks, \
+    exec_command, sleep
 
 
 def compile_job(job):
     """Creates tasks from the given job."""
-
-    import datetime
-    from bson import tz_util
-    from flamenco import current_flamenco
 
     compiler = construct_job_compiler(job)
     compiler.compile(job)
